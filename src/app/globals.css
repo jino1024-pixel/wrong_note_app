@@ -116,6 +116,7 @@
   * {
     @apply border-border outline-ring/50;
   }
+
   body {
     @apply bg-background text-foreground;
   }
@@ -126,25 +127,20 @@
     size: auto;
     margin: 0mm;
   }
-  
+
   body {
     print-color-adjust: exact;
     -webkit-print-color-adjust: exact;
   }
 
-  /* Hide everything by default */
-  body > * {
-    display: none !important;
-  }
-
-  /* Only show the print container */
-  /* We assume the print content is wrapped in a specific class or we handle it via react-to-print's ref */
-  /* However, react-to-print usually handles this by creating an iframe. 
-     But if we want to support native browser print (Cmd+P), we need this. 
-     Since the user mentioned "printing", let's make sure .no-print class works globally 
-     and specific print areas are visible. */
-  
+  /* Hide UI elements */
+  header,
+  nav,
+  button,
   .no-print {
     display: none !important;
   }
+
+  /* Ensure the print content is visible and takes full width */
+  /* This assumes the print content is not inside one of the hidden elements */
 }

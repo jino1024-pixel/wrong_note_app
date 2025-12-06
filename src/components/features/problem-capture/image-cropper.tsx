@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
-import { Check, X, RotateCw, RotateCcw, ZoomIn, ZoomOut, Eraser } from "lucide-react";
+import { Check, X, RotateCw, RotateCcw, ZoomIn, ZoomOut, Eraser, Download, Share2 } from "lucide-react";
 
 interface ImageCropperProps {
     imageSrc: string;
@@ -20,47 +20,100 @@ export function ImageCropper({ imageSrc, onCropComplete, onCancel }: ImageCroppe
     const [rotation, setRotation] = useState(0);
     const [cleanMode, setCleanMode] = useState(false);
     const [processedImage, setProcessedImage] = useState<string>(imageSrc);
+    const [isProcessing, setIsProcessing] = useState(false);
 
-    // Apply binarization (thresholding) to remove handwriting/noise
+    // Adaptive Thresholding Implementation
+    const applyAdaptiveThreshold = (ctx: CanvasRenderingContext2D, width: number, height: number) => {
+        const imageData = ctx.getImageData(0, 0, width, height);
+        const data = imageData.data;
+        const gray = new Uint8Array(width * height);
+
+        // 1. Convert to Grayscale
+        for (let i = 0; i < width * height; i++) {
+            const r = data[i * 4];
+            const g = data[i * 4 + 1];
+            const b = data[i * 4 + 2];
+            gray[i] = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        }
+
+        // 2. Compute Integral Image (Summed Area Table)
+        const integral = new Uint32Array(width * height);
+        for (let y = 0; y < height; y++) {
+            let sum = 0;
+            for (let x = 0; x < width; x++) {
+                sum += gray[y * width + x];
+                if (y === 0) {
+                    integral[y * width + x] = sum;
+                } else {
+                    integral[y * width + x] = sum + integral[(y - 1) * width + x];
+                }
+            }
+        }
+
+        // 3. Adaptive Thresholding
+        // Window size should be large enough to cover text strokes but small enough for local shadows
+        // 1/8 of min dimension or fixed size like 40-50 pixels often works well for documents
+        const windowSize = Math.max(20, Math.floor(Math.min(width, height) / 20));
+        const s2 = Math.floor(windowSize / 2);
+        const t = 15; // Threshold constant (how much darker than mean to be considered black)
+
+        for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+                const x1 = Math.max(x - s2, 0);
+                const x2 = Math.min(x + s2, width - 1);
+                const y1 = Math.max(y - s2, 0);
+                const y2 = Math.min(y + s2, height - 1);
+
+                const count = (x2 - x1 + 1) * (y2 - y1 + 1);
+
+                // Calculate sum of the window using integral image
+                // Sum = I(D) - I(B) - I(C) + I(A)
+                let sum = integral[y2 * width + x2];
+                if (y1 > 0) sum -= integral[(y1 - 1) * width + x2];
+                if (x1 > 0) sum -= integral[y2 * width + (x1 - 1)];
+                if (y1 > 0 && x1 > 0) sum += integral[(y1 - 1) * width + (x1 - 1)];
+
+                const mean = sum / count;
+
+                // If pixel is significantly darker than local mean, it's text (black)
+                // Otherwise it's background (white)
+                const val = gray[y * width + x] < (mean - t) ? 0 : 255;
+
+                const idx = (y * width + x) * 4;
+                data[idx] = val;
+                data[idx + 1] = val;
+                data[idx + 2] = val;
+                // Alpha remains unchanged (usually 255)
+            }
+        }
+
+        ctx.putImageData(imageData, 0, 0);
+    };
+
     useEffect(() => {
         if (cleanMode) {
-            const img = new Image();
-            img.crossOrigin = "anonymous";
-            img.src = imageSrc;
-            img.onload = () => {
-                const canvas = document.createElement("canvas");
-                const ctx = canvas.getContext("2d");
-                if (!ctx) return;
+            setIsProcessing(true);
+            // Use setTimeout to allow UI to update before heavy processing
+            setTimeout(() => {
+                const img = new Image();
+                img.crossOrigin = "anonymous";
+                img.src = imageSrc;
+                img.onload = () => {
+                    const canvas = document.createElement("canvas");
+                    const ctx = canvas.getContext("2d");
+                    if (!ctx) return;
 
-                canvas.width = img.width;
-                canvas.height = img.height;
-                ctx.drawImage(img, 0, 0);
+                    // Limit processing size for performance if needed, but keeping full res for quality
+                    canvas.width = img.width;
+                    canvas.height = img.height;
+                    ctx.drawImage(img, 0, 0);
 
-                const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                const data = imageData.data;
+                    applyAdaptiveThreshold(ctx, canvas.width, canvas.height);
 
-                // Simple thresholding
-                // You can adjust the threshold value (128 is standard middle gray)
-                const threshold = 160;
-
-                for (let i = 0; i < data.length; i += 4) {
-                    const r = data[i];
-                    const g = data[i + 1];
-                    const b = data[i + 2];
-                    // Calculate luminance
-                    const v = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-
-                    // Apply threshold: if lighter than threshold, make it white; else black
-                    const bin = v >= threshold ? 255 : 0;
-
-                    data[i] = bin;
-                    data[i + 1] = bin;
-                    data[i + 2] = bin;
-                }
-
-                ctx.putImageData(imageData, 0, 0);
-                setProcessedImage(canvas.toDataURL());
-            };
+                    setProcessedImage(canvas.toDataURL());
+                    setIsProcessing(false);
+                };
+            }, 50);
         } else {
             setProcessedImage(imageSrc);
         }
@@ -83,6 +136,40 @@ export function ImageCropper({ imageSrc, onCropComplete, onCancel }: ImageCroppe
         }
     };
 
+    const handleDownload = async () => {
+        const cropper = cropperRef.current?.cropper;
+        if (!cropper) return;
+
+        const croppedCanvas = cropper.getCroppedCanvas();
+        if (!croppedCanvas) return;
+
+        const dataUrl = croppedCanvas.toDataURL("image/png");
+        const blob = await (await fetch(dataUrl)).blob();
+        const file = new File([blob], `wrong-note-${Date.now()}.png`, { type: "image/png" });
+
+        // Try Web Share API first
+        if (navigator.share && navigator.canShare({ files: [file] })) {
+            try {
+                await navigator.share({
+                    files: [file],
+                    title: '오답노트 이미지',
+                    text: '오답노트 이미지를 저장합니다.',
+                });
+                return;
+            } catch (error) {
+                console.log("Share failed, falling back to download", error);
+            }
+        }
+
+        // Fallback to download
+        const link = document.createElement("a");
+        link.href = dataUrl;
+        link.download = `wrong-note-${Date.now()}.png`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    };
+
     const handleRotateLeft = () => {
         setRotation((prev) => prev - 90);
     };
@@ -102,6 +189,11 @@ export function ImageCropper({ imageSrc, onCropComplete, onCancel }: ImageCroppe
     return (
         <div className="fixed inset-0 z-50 bg-black/90 flex flex-col items-center justify-center p-4">
             <div className="relative w-full max-w-3xl bg-black rounded-lg overflow-hidden flex-1 min-h-0">
+                {isProcessing && (
+                    <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+                        <div className="text-white">이미지 처리 중...</div>
+                    </div>
+                )}
                 <Cropper
                     src={processedImage}
                     style={{ height: "100%", width: "100%" }}
@@ -137,7 +229,7 @@ export function ImageCropper({ imageSrc, onCropComplete, onCancel }: ImageCroppe
                 <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2 text-white">
                         <Eraser className="w-4 h-4" />
-                        <Label htmlFor="clean-mode" className="cursor-pointer">필기 지우기 (Clean Mode)</Label>
+                        <Label htmlFor="clean-mode" className="cursor-pointer">필기 지우기 (그림자 제거)</Label>
                     </div>
                     <Switch
                         id="clean-mode"
@@ -167,6 +259,10 @@ export function ImageCropper({ imageSrc, onCropComplete, onCancel }: ImageCroppe
                     <Button variant="outline" className="flex-1 bg-white/10 text-white hover:bg-white/20 border-white/20" onClick={onCancel}>
                         <X className="w-4 h-4 mr-2" />
                         취소
+                    </Button>
+                    <Button variant="outline" className="flex-1 bg-white/10 text-white hover:bg-white/20 border-white/20" onClick={handleDownload}>
+                        <Share2 className="w-4 h-4 mr-2" />
+                        저장/공유
                     </Button>
                     <Button className="flex-1" onClick={handleSave}>
                         <Check className="w-4 h-4 mr-2" />
