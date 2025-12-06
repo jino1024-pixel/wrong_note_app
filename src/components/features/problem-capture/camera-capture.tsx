@@ -23,7 +23,6 @@ export function CameraCapture({ onCapture }: CameraCaptureProps) {
             <input
                 type="file"
                 accept="image/*"
-                capture="environment"
                 className="hidden"
                 ref={fileInputRef}
                 onChange={handleFileChange}
@@ -31,11 +30,11 @@ export function CameraCapture({ onCapture }: CameraCaptureProps) {
 
             <div className="text-center space-y-2">
                 <div className="bg-primary/10 p-4 rounded-full w-fit mx-auto">
-                    <Camera className="w-8 h-8 text-primary" />
+                    <Upload className="w-8 h-8 text-primary" />
                 </div>
-                <h3 className="text-lg font-semibold">문제 촬영하기</h3>
+                <h3 className="text-lg font-semibold">문제 추가하기</h3>
                 <p className="text-sm text-muted-foreground">
-                    카메라로 문제를 촬영하거나 갤러리에서 선택하세요
+                    카메라로 촬영하거나 갤러리에서 선택하세요
                 </p>
             </div>
 
@@ -45,7 +44,7 @@ export function CameraCapture({ onCapture }: CameraCaptureProps) {
                     onClick={() => fileInputRef.current?.click()}
                 >
                     <Camera className="w-4 h-4" />
-                    촬영 / 선택
+                    촬영 / 앨범 선택
                 </Button>
             </div>
         </div>
