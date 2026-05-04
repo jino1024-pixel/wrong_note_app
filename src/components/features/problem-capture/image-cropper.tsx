@@ -19,14 +19,17 @@ export function ImageCropper({ imageSrc, onCropComplete, onCancel }: ImageCroppe
     const cropperRef = useRef<ReactCropperElement>(null);
     const [rotation, setRotation] = useState(0);
     const [cleanMode, setCleanMode] = useState(false);
+    const [sensitivity, setSensitivity] = useState(50);
     const [processedImage, setProcessedImage] = useState<string>(imageSrc);
     const [isProcessing, setIsProcessing] = useState(false);
 
-    // Adaptive Thresholding Implementation
-    const applyAdaptiveThreshold = (ctx: CanvasRenderingContext2D, width: number, height: number) => {
+    // Computer Vision Heuristic for Handwriting Removal
+    const applyHandwritingRemoval = (ctx: CanvasRenderingContext2D, width: number, height: number, sensitivityLevel: number) => {
         const imageData = ctx.getImageData(0, 0, width, height);
         const data = imageData.data;
         const gray = new Uint8Array(width * height);
+
+        const binaryData = new Uint8Array(width * height);
 
         // 1. Convert to Grayscale
         for (let i = 0; i < width * height; i++) {
@@ -50,12 +53,10 @@ export function ImageCropper({ imageSrc, onCropComplete, onCancel }: ImageCroppe
             }
         }
 
-        // 3. Adaptive Thresholding
-        // Window size should be large enough to cover text strokes but small enough for local shadows
-        // 1/8 of min dimension or fixed size like 40-50 pixels often works well for documents
+        // 3. Adaptive Thresholding to create Binary Image
         const windowSize = Math.max(20, Math.floor(Math.min(width, height) / 20));
         const s2 = Math.floor(windowSize / 2);
-        const t = 15; // Threshold constant (how much darker than mean to be considered black)
+        const t = 15; // Threshold constant
 
         for (let y = 0; y < height; y++) {
             for (let x = 0; x < width; x++) {
@@ -66,24 +67,132 @@ export function ImageCropper({ imageSrc, onCropComplete, onCancel }: ImageCroppe
 
                 const count = (x2 - x1 + 1) * (y2 - y1 + 1);
 
-                // Calculate sum of the window using integral image
-                // Sum = I(D) - I(B) - I(C) + I(A)
                 let sum = integral[y2 * width + x2];
                 if (y1 > 0) sum -= integral[(y1 - 1) * width + x2];
                 if (x1 > 0) sum -= integral[y2 * width + (x1 - 1)];
                 if (y1 > 0 && x1 > 0) sum += integral[(y1 - 1) * width + (x1 - 1)];
 
                 const mean = sum / count;
+                
+                // binaryData[i] = 1 means foreground (black text/stroke)
+                binaryData[y * width + x] = gray[y * width + x] < (mean - t) ? 1 : 0;
+            }
+        }
 
-                // If pixel is significantly darker than local mean, it's text (black)
-                // Otherwise it's background (white)
-                const val = gray[y * width + x] < (mean - t) ? 0 : 255;
+        // 4. Connected Component Labeling (CCL)
+        const labels = new Int32Array(width * height);
+        let currentLabel = 1;
+        const components: { label: number; minX: number; maxX: number; minY: number; maxY: number; area: number; perimeter: number; }[] = [];
 
-                const idx = (y * width + x) * 4;
-                data[idx] = val;
-                data[idx + 1] = val;
-                data[idx + 2] = val;
-                // Alpha remains unchanged (usually 255)
+        const stack = new Int32Array(width * height);
+        
+        // 8-way neighbors for connectivity, 4-way for boundary detection
+        const dx = [1, 1, 0, -1, -1, -1, 0, 1];
+        const dy = [0, 1, 1, 1, 0, -1, -1, -1];
+
+        for (let i = 0; i < width * height; i++) {
+            if (binaryData[i] === 1 && labels[i] === 0) {
+                let minX = i % width, maxX = minX;
+                let minY = Math.floor(i / width), maxY = minY;
+                let area = 0;
+                let perimeter = 0;
+
+                stack[0] = i;
+                let stackPtr = 1;
+                labels[i] = currentLabel;
+
+                while (stackPtr > 0) {
+                    stackPtr--;
+                    const currIdx = stack[stackPtr];
+                    const cx = currIdx % width;
+                    const cy = Math.floor(currIdx / width);
+                    area++;
+
+                    if (cx < minX) minX = cx;
+                    if (cx > maxX) maxX = cx;
+                    if (cy < minY) minY = cy;
+                    if (cy > maxY) maxY = cy;
+
+                    let isBoundary = false;
+
+                    for (let n = 0; n < 8; n++) {
+                        const nx = cx + dx[n];
+                        const ny = cy + dy[n];
+                        if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                            const nIdx = ny * width + nx;
+                            if (binaryData[nIdx] === 0) {
+                                if (n % 2 === 0) isBoundary = true; 
+                            } else if (labels[nIdx] === 0) {
+                                labels[nIdx] = currentLabel;
+                                stack[stackPtr++] = nIdx;
+                            }
+                        } else {
+                            if (n % 2 === 0) isBoundary = true;
+                        }
+                    }
+                    if (isBoundary) perimeter++;
+                }
+
+                components.push({ label: currentLabel, minX, maxX, minY, maxY, area, perimeter });
+                currentLabel++;
+            }
+        }
+
+        // 5. Filter Handwritings Based on Shape Regularity
+        const keepLabel = new Uint8Array(currentLabel);
+        keepLabel.fill(1);
+        keepLabel[0] = 0;
+
+        // Map sensitivity (0-100) to thresholds
+        const maxCrookedness = 4.0 - (sensitivityLevel / 100) * 2.5; // 4.0 (weak) to 1.5 (strong)
+        const maxCompactness = 400 - (sensitivityLevel / 100) * 300; // 400 (weak) to 100 (strong)
+
+        for (let j = 0; j < components.length; j++) {
+            const comp = components[j];
+            const w = comp.maxX - comp.minX + 1;
+            const h = comp.maxY - comp.minY + 1;
+            const diag = Math.sqrt(w * w + h * h);
+
+            // Noise removal (dust)
+            if (comp.area < 3 + (sensitivityLevel / 100) * 15) {
+                keepLabel[comp.label] = 0;
+                continue;
+            }
+
+            // Extremely large components (likely frames, big illustrations)
+            if (comp.area > width * height * 0.1) {
+                keepLabel[comp.label] = 1;
+                continue;
+            }
+
+            const crookedness = comp.perimeter / (2 * Math.max(diag, 1));
+            const compactness = (comp.perimeter * comp.perimeter) / Math.max(comp.area, 1);
+
+            let isHandwriting = false;
+
+            if (crookedness > maxCrookedness) {
+                isHandwriting = true; 
+            } else if (compactness > maxCompactness && crookedness > 1.3) {
+                isHandwriting = true;
+            }
+
+            if (isHandwriting) {
+                keepLabel[comp.label] = 0;
+            }
+        }
+
+        // 6. Draw the result back to image data
+        for (let i = 0; i < width * height; i++) {
+            const lbl = labels[i];
+            const idx = i * 4;
+            if (lbl > 0 && keepLabel[lbl] === 1) {
+                data[idx] = 0;
+                data[idx + 1] = 0;
+                data[idx + 2] = 0;
+            } else {
+                data[idx] = 255;
+                data[idx + 1] = 255;
+                data[idx + 2] = 255;
             }
         }
 
@@ -108,7 +217,7 @@ export function ImageCropper({ imageSrc, onCropComplete, onCancel }: ImageCroppe
                     canvas.height = img.height;
                     ctx.drawImage(img, 0, 0);
 
-                    applyAdaptiveThreshold(ctx, canvas.width, canvas.height);
+                    applyHandwritingRemoval(ctx, canvas.width, canvas.height, sensitivity);
 
                     setProcessedImage(canvas.toDataURL());
                     setIsProcessing(false);
@@ -117,7 +226,7 @@ export function ImageCropper({ imageSrc, onCropComplete, onCancel }: ImageCroppe
         } else {
             setProcessedImage(imageSrc);
         }
-    }, [cleanMode, imageSrc]);
+    }, [cleanMode, sensitivity, imageSrc]);
 
     // Update cropper rotation when slider changes
     useEffect(() => {
@@ -226,16 +335,34 @@ export function ImageCropper({ imageSrc, onCropComplete, onCancel }: ImageCroppe
                 </div>
 
                 {/* Clean Mode Toggle */}
-                <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2 text-white">
-                        <Eraser className="w-4 h-4" />
-                        <Label htmlFor="clean-mode" className="cursor-pointer">필기 지우기 (그림자 제거)</Label>
+                <div className="flex flex-col gap-3">
+                    <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 text-white">
+                            <Eraser className="w-4 h-4" />
+                            <Label htmlFor="clean-mode" className="cursor-pointer">필기 지우기 (형태 분석)</Label>
+                        </div>
+                        <Switch
+                            id="clean-mode"
+                            checked={cleanMode}
+                            onCheckedChange={setCleanMode}
+                        />
                     </div>
-                    <Switch
-                        id="clean-mode"
-                        checked={cleanMode}
-                        onCheckedChange={setCleanMode}
-                    />
+                    {cleanMode && (
+                        <div className="space-y-2 animate-in fade-in slide-in-from-top-2 duration-300">
+                            <div className="flex justify-between text-white/70 text-xs">
+                                <span>제거 강도: 약함 (도형 보존)</span>
+                                <span>강함 (강력 제거)</span>
+                            </div>
+                            <Slider
+                                value={[sensitivity]}
+                                min={0}
+                                max={100}
+                                step={1}
+                                onValueChange={(val) => setSensitivity(val[0])}
+                                className="py-1"
+                            />
+                        </div>
+                    )}
                 </div>
 
                 {/* Action Buttons */}
